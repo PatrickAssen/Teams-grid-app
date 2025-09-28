@@ -19,7 +19,31 @@
   const adminToggle = $("#adminToggle");
   const tileTpl = $("#tileTpl");
 
+  // Width-aware column clamping so tiles never overflow the dotted grid
+  function desiredColsByCount(n){
+    if (n <= 4) return 2;
+    if (n <= 9) return 3;
+    if (n <= 16) return 4;
+    return 5;
+  }
+  function clampColsToWidth(cols){
+    const cs = getComputedStyle(gridEl);
+    const gap = parseFloat(cs.gap) || 10;
+    const w = gridEl.clientWidth || gridEl.getBoundingClientRect().width || 0;
+    const MIN_TILE = 100; // px
+    const maxColsByWidth = Math.max(1, Math.floor((w + gap) / (MIN_TILE + gap)));
+    return Math.max(1, Math.min(cols, maxColsByWidth));
+  }
+  function applyCols(){
+    const n = state.gridIds.length;
+    const desired = desiredColsByCount(n);
+    const cols = clampColsToWidth(desired);
+    gridEl.style.setProperty("--cols", cols);
+  }
+
+
   // State
+  let suppressListPersistOnce = false;
   let state = {
     allNames: [],     // [{id, text}]
     availableIds: [], // queue list ids not yet in grid
@@ -64,14 +88,7 @@
       gridEl.appendChild(el);
     });
     // columns rule
-    const n = state.gridIds.length;
-    let cols = 2;
-    if (n <= 4) cols = 2;
-    else if (n <= 9) cols = 3;
-    else if (n <= 16) cols = 4;
-    else cols = 5;
-    gridEl.style.setProperty("--cols", cols);
-    gridEl.style.setProperty("--cols", cols);
+    applyCols();
     // Enable click toggle when started
     if (state.started) {
       $$(".tile", gridEl).forEach(t => {
@@ -111,8 +128,8 @@
       sidebarEl.classList.add("hidden");
       overlayEl.style.display = "none";
       showListBtn.disabled = false;
-      // Disable reordering during started
-      gridSortable.option("disabled", true);
+      // Reordering blijft aan in startmodus
+      gridSortable.option("disabled", false);
     } else {
       sidebarEl.classList.remove("hidden");
       overlayEl.style.display = "none";
@@ -186,6 +203,7 @@
     state.started = true;
     save();
     renderGrid();
+    applyCols();
     syncUIByMode();
   });
 
@@ -197,6 +215,7 @@
     save();
     renderList();
     renderGrid();
+    applyCols();
     syncUIByMode();
   });
 
@@ -204,23 +223,38 @@
     // Show sidebar overlay to add people during started
     sidebarEl.classList.remove("hidden");
     overlayEl.style.display = "block";
+    if (gridSortable) {
+      gridSortable.option("disabled", false);   // allow adding from list
+      gridSortable.option("sort", true); // but keep reordering off in started mode
+    }
   });
   overlayEl.addEventListener("click", () => {
     overlayEl.style.display = "none";
     if (state.started) sidebarEl.classList.add("hidden");
+    if (gridSortable && state.started) {
+      gridSortable.option("disabled", true);
+      gridSortable.option("sort", false);
+    }
   });
   closeSidebar.addEventListener("click", () => {
     overlayEl.style.display = "none";
     if (state.started) sidebarEl.classList.add("hidden");
+    if (gridSortable && state.started) {
+      gridSortable.option("disabled", true);
+      gridSortable.option("sort", false);
+    }
   });
 
   filterInput.addEventListener("input", renderList);
   if (adminToggle) {
     const stored = localStorage.getItem("tg_admin_on");
     if (stored !== null) adminToggle.checked = stored === "1";
+    // Apply class at boot
+    document.body.classList.toggle('admin-on', !!adminToggle.checked);
     adminToggle.addEventListener("change", () => {
       localStorage.setItem("tg_admin_on", adminToggle.checked ? "1" : "0");
-      syncUIByMode();
+      // Only toggle the controls panel visibility. Do not touch sidebar visibility.
+      document.body.classList.toggle('admin-on', !!adminToggle.checked);
     });
   }
     
@@ -236,7 +270,7 @@
       onUnchoose: () => { gridEl.classList.remove("drag-target"); },
       animation: 150,
       group: { name: "people", pull: true, put: true },
-      delay: 1000,
+      delay: 200,
       delayOnTouchOnly: true,
       touchStartThreshold: 0,
       onAdd: (evt) => {
@@ -277,7 +311,8 @@
         state.lastSelectedIndex = null;
       },
       onUpdate: (evt) => {
-        // Recompute grid order
+        // Only when reordering inside the grid itself
+        if (!(evt.from === gridEl && evt.to === gridEl)) return;
         state.gridIds = $$(".tile", gridEl).map(el => el.dataset.id);
         save();
       }
@@ -285,13 +320,27 @@
 
     listSortable = new Sortable(nameListEl, {
       animation: 150,
-      group: { name: "people", pull: "clone", put: false },
+      group: { name: "people", pull: "clone", put: true },
       sort: true,
       delay: 120,
       delayOnTouchOnly: true,
       forceFallback: true,
       draggable: ".name-item",
+      onAdd: (evt) => {
+        const fromGrid = (evt.from === gridEl);
+        const id = evt.item && evt.item.dataset ? evt.item.dataset.id : null;
+        if (fromGrid && id) {
+          suppressListPersistOnce = true;
+          state.gridIds = state.gridIds.filter(x => x !== id);
+          if (!state.availableIds.includes(id)) state.availableIds.push(id);
+          if (evt.item && evt.item.parentNode) evt.item.parentNode.removeChild(evt.item);
+          save();
+          renderList();
+          renderGrid();
+        }
+      },
       onStart: (evt) => {
+        if (overlayEl) overlayEl.style.pointerEvents = "none";
         nameListEl.classList.add("dragging");
         if (gridEl) gridEl.classList.add("drag-target");
         if (evt.item) evt.item.classList.add("dragging");
@@ -318,7 +367,14 @@
   // Boot
   load();
   initSortables();
+
+  // Re-apply column clamp on resize
+  const ro = new ResizeObserver(() => applyCols());
+  ro.observe(gridEl);
+  window.addEventListener("resize", applyCols);
+
   renderList();
   renderGrid();
+  applyCols();
   syncUIByMode();
 })();
